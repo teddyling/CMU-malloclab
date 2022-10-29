@@ -16,7 +16,7 @@
  *
  *************************************************************************
  *
- * @author Your Name <andrewid@andrew.cmu.edu>
+ * @author Taichen Ling <taichenl@andrew.cmu.edu>
  */
 
 #include <assert.h>
@@ -110,32 +110,18 @@ static const word_t alloc_mask = 0x1;
  */
 static const word_t size_mask = ~(word_t)0xF;
 
+
 /** @brief Represents the header and payload of one block in the heap */
 typedef struct block {
     /** @brief Header contains size + allocation flag */
     word_t header;
-
-    /**
-     * @brief A pointer to the block payload.
-     *
-     * TODO: feel free to delete this comment once you've read it carefully.
-     * We don't know what the size of the payload will be, so we will declare
-     * it as a zero-length array, which is a GNU compiler extension. This will
-     * allow us to obtain a pointer to the start of the payload. (The similar
-     * standard-C feature of "flexible array members" won't work here because
-     * those are not allowed to be members of a union.)
-     *
-     * WARNING: A zero-length array must be the last element in a struct, so
-     * there should not be any struct fields after it. For this lab, we will
-     * allow you to include a zero-length array in a union, as long as the
-     * union is the last field in its containing struct. However, this is
-     * compiler-specific behavior and should be avoided in general.
-     *
-     * WARNING: DO NOT cast this pointer to/from other types! Instead, you
-     * should use a union to alias this zero-length array with another struct,
-     * in order to store additional types of data in the payload memory.
-     */
-    char payload[0];
+    union Payload {
+        struct Pointer {
+            struct block* prev;
+            struct block* next;
+        } pointer;
+        char p[0];
+    } payload;
 
     /*
      * TODO: delete or replace this comment once you've thought about it.
@@ -149,7 +135,13 @@ typedef struct block {
 
 /** @brief Pointer to first block in the heap */
 static block_t *heap_start = NULL;
+static block_t* freeListHead;
+static block_t* freeListTail;
 
+void insertFirst(block_t* block);
+void delete(block_t* block);
+void splitBlock(block_t* block, block_t* nextBlock);
+void split(block_t* block, size_t asize);
 /*
  *****************************************************************************
  * The functions below are short wrapper functions to perform                *
@@ -251,7 +243,7 @@ static block_t *payload_to_header(void *bp) {
  */
 static void *header_to_payload(block_t *block) {
     dbg_requires(get_size(block) != 0);
-    return (void *)(block->payload);
+    return (void *)(&(block->payload));
 }
 
 /**
@@ -264,7 +256,7 @@ static void *header_to_payload(block_t *block) {
 static word_t *header_to_footer(block_t *block) {
     dbg_requires(get_size(block) != 0 &&
                  "Called header_to_footer on the epilogue block");
-    return (word_t *)(block->payload + get_size(block) - dsize);
+    return (word_t *)(((char*)&(block->payload)) + get_size(block) - dsize);
 }
 
 /**
@@ -422,23 +414,54 @@ static block_t *find_prev(block_t *block) {
  * @return
  */
 static block_t *coalesce_block(block_t *block) {
-    /*
-     * TODO: delete or replace this comment once you're done.
-     *
-     * Before you start, it will be helpful to review the "Dynamic Memory
-     * Allocation: Basic" lecture, and especially the four coalescing
-     * cases that are described.
-     *
-     * The actual content of the function will probably involve a call to
-     * find_prev(), and multiple calls to write_block(). For examples of how
-     * to use write_block(), take a look at split_block().
-     *
-     * Please do not reference code from prior semesters for this, including
-     * old versions of the 213 website. We also discourage you from looking
-     * at the malloc code in CS:APP and K&R, which make heavy use of macros
-     * and which we no longer consider to be good style.
-     */
-    return block;
+    dbg_assert(!get_alloc(block)); 
+    size_t thisSize = get_size(block);
+    if (block == heap_start) {
+        bool nextAlloc = get_alloc(find_next(block));
+        if (nextAlloc) {
+            insertFirst(block);
+            return block;
+        } else {
+            block_t* nextBlock = find_next(block);
+            size_t nextSize = get_size(nextBlock);
+            delete(nextBlock);
+            write_block(block, thisSize + nextSize, false);
+            insertFirst(block);
+            return block;
+        }
+    }
+    bool prevAlloc = get_alloc(find_prev(block));
+    bool nextAlloc = get_alloc(find_next(block));
+
+    if (prevAlloc && nextAlloc) {
+        insertFirst(block);
+        return block;
+    } else if (prevAlloc && !nextAlloc) {
+        block_t* nextBlock = find_next(block);
+        size_t nextSize = get_size(nextBlock);
+        delete(nextBlock);
+        write_block(block, thisSize + nextSize, false);
+        insertFirst(block);
+        return block;
+    } else if (!prevAlloc && nextAlloc) {
+        block_t* prevBlock = find_prev(block);
+        size_t prevSize = get_size(prevBlock);
+        delete(prevBlock);
+        write_block(prevBlock, thisSize + prevSize, false);
+        insertFirst(prevBlock);
+        return prevBlock;
+    } else if (!prevAlloc && !nextAlloc){
+        block_t* prevBlock = find_prev(block);
+        block_t* nextBlock = find_next(block);
+        size_t prevSize = get_size(prevBlock);
+        size_t nextSize = get_size(nextBlock);
+        delete(prevBlock);
+        delete(nextBlock);
+        write_block(prevBlock, thisSize + prevSize + nextSize, false);
+        insertFirst(prevBlock);
+        return prevBlock;
+    }
+    return NULL;
 }
 
 /**
@@ -493,9 +516,9 @@ static block_t *extend_heap(size_t size) {
  * @param[in] block
  * @param[in] asize
  */
+/* 
 static void split_block(block_t *block, size_t asize) {
     dbg_requires(get_alloc(block));
-    /* TODO: Can you write a precondition about the value of asize? */
 
     size_t block_size = get_size(block);
 
@@ -510,6 +533,7 @@ static void split_block(block_t *block, size_t asize) {
     dbg_ensures(get_alloc(block));
 }
 
+ */
 /**
  * @brief
  *
@@ -522,13 +546,12 @@ static void split_block(block_t *block, size_t asize) {
  * @return
  */
 static block_t *find_fit(size_t asize) {
-    block_t *block;
-
-    for (block = heap_start; get_size(block) > 0; block = find_next(block)) {
-
-        if (!(get_alloc(block)) && (asize <= get_size(block))) {
+    block_t *block = freeListHead->payload.pointer.next;
+    while (block != freeListTail) {
+        if (get_size(block) >= asize) {
             return block;
         }
+        block = block->payload.pointer.next;
     }
     return NULL; // no fit found
 }
@@ -544,23 +567,77 @@ static block_t *find_fit(size_t asize) {
  * @param[in] line
  * @return
  */
+
 bool mm_checkheap(int line) {
-    /*
-     * TODO: Delete this comment!
-     *
-     * You will need to write the heap checker yourself.
-     * Please keep modularity in mind when you're writing the heap checker!
-     *
-     * As a filler: one guacamole is equal to 6.02214086 x 10**23 guacas.
-     * One might even call it...  the avocado's number.
-     *
-     * Internal use only: If you mix guacamole on your bibimbap,
-     * do you eat it with a pair of chopsticks, or with a spoon?
-     */
-    dbg_printf("I did not write a heap checker (called at line %d)\n", line);
+    dbg_printf("Called Line: %d\n", line);
+    //word_t* prologue = (word_t*)freeListHead - 1;
+    //dbg_printf("Prologue Address: %p, Prologue value: %lx\n",(void *) prologue, *(prologue));
+    //dbg_printf("The free list head address is :%p, header is :%lx footer is: %lx\n", (void*) freeListHead, freeListHead->header, *(header_to_footer(freeListHead)));
+    //dbg_printf("The free list tail address is :%p, header is :%lx footer is: %lx\n", (void*) freeListTail, freeListTail->header, *(header_to_footer(freeListTail)));
+    dbg_printf("heap starts at: %p\n", (void*) heap_start);
+    for (block_t* block = heap_start; get_size(block) != 0; block = find_next(block)) {
+        dbg_printf("The block address is %p\n", (void*) block);
+        dbg_printf("The payload address is %p\n", (void*) &(block->payload));
+        if (((size_t)&(block->payload)) % 16 != 0) {
+            dbg_printf("payload address %p is not aligned!\n",(void*) &(block->payload));
+        }
+        dbg_printf("The block size from header is: %ld, allocate: %d\n", get_size(block), get_alloc(block));
+        dbg_printf("The block size from footer is: %ld, allocate: %d\n", extract_size(*header_to_footer(block)), extract_alloc(*header_to_footer(block)));   
+    }
+
+
     return true;
 }
 
+void insertFirst(block_t* block) {
+    block->payload.pointer.prev = freeListHead;
+    block->payload.pointer.next = freeListHead->payload.pointer.next;
+    freeListHead->payload.pointer.next->payload.pointer.prev = block;
+    freeListHead->payload.pointer.next = block;
+}
+
+void delete(block_t* block) {
+    block->payload.pointer.prev->payload.pointer.next = block->payload.pointer.next;
+    block->payload.pointer.next->payload.pointer.prev = block->payload.pointer.prev;
+}
+//split the block and add the remaining block to the free list
+/* void splitBlock(block_t* block, size_t asize) {
+    dbg_requires(get_alloc(block));
+    size_t thisSize = get_size(block);
+    if(thisSize - asize >= min_block_size) {
+        block_t* nextBlock;
+        write_block(block, asize, true);
+        nextBlock = find_next(block);
+        write_block(nextBlock, thisSize - asize, false);
+        insertFirst(nextBlock);
+    }
+    dbg_ensures(get_alloc(block));
+} */
+
+void split(block_t* block, size_t asize) {
+    dbg_requires(get_alloc(block));
+    size_t thisSize = get_size(block);
+    if (thisSize - asize >= min_block_size) {
+        block_t* nextBlock;
+        write_block(block, asize, true);
+        nextBlock = find_next(block);
+        write_block(nextBlock, thisSize - asize, false);
+        splitBlock(block, nextBlock);
+    } else {
+        delete(block);
+    }
+}
+
+void splitBlock(block_t* block, block_t* nextBlock) {
+    block_t* prevBlock = block->payload.pointer.prev;
+    block_t* postBlock = block->payload.pointer.next;
+    prevBlock->payload.pointer.next = nextBlock;
+    nextBlock->payload.pointer.prev = prevBlock;
+    nextBlock->payload.pointer.next = postBlock;
+    postBlock->payload.pointer.prev = nextBlock;
+
+
+}
 /**
  * @brief
  *
@@ -573,28 +650,31 @@ bool mm_checkheap(int line) {
  */
 bool mm_init(void) {
     // Create the initial empty heap
-    word_t *start = (word_t *)(mem_sbrk(2 * wsize));
+    word_t *start = (word_t *)(mem_sbrk(10 * wsize));
 
     if (start == (void *)-1) {
         return false;
     }
-
-    /*
-     * TODO: delete or replace this comment once you've thought about it.
-     * Think about why we need a heap prologue and epilogue. Why do
-     * they correspond to a block footer and header respectively?
-     */
-
-    start[0] = pack(0, true); // Heap prologue (block footer)
-    start[1] = pack(0, true); // Heap epilogue (block header)
-
-    // Heap starts with first "block header", currently the epilogue
-    heap_start = (block_t *)&(start[1]);
+    // A placeholder block which represent the head of the doubly linked list
+    write_block((block_t*) &(start[0]), min_block_size, true);
+    freeListHead = (block_t*)start;
+    write_block((block_t*) &(start[4]), min_block_size, true);
+    freeListTail = (block_t*) &(start[4]);
+    
+    start[8] = pack(0, true); // Heap prologue (block footer)
+    start[9] = pack(0, true); // Heap epilogue (block header)
+    //Let the head and tail be connected
+    freeListHead->payload.pointer.next = freeListTail;
+    freeListTail->payload.pointer.prev = freeListHead;
+    // Heap start at the end of the tail, the epilogue for now
+    heap_start = (block_t*) &(start[9]);
 
     // Extend the empty heap with a free block of chunksize bytes
-    if (extend_heap(chunksize) == NULL) {
+    block_t* extendFreeBlock = extend_heap(chunksize);
+    if (extendFreeBlock == NULL) {
         return false;
     }
+    //insertFirst(extendFreeBlock);
 
     return true;
 }
@@ -617,7 +697,6 @@ void *malloc(size_t size) {
     size_t extendsize; // Amount to extend heap if no fit is found
     block_t *block;
     void *bp = NULL;
-
     // Initialize heap if it isn't initialized
     if (heap_start == NULL) {
         if (!(mm_init())) {
@@ -625,43 +704,36 @@ void *malloc(size_t size) {
             return NULL;
         }
     }
-
     // Ignore spurious request
     if (size == 0) {
         dbg_ensures(mm_checkheap(__LINE__));
         return bp;
     }
-
     // Adjust block size to include overhead and to meet alignment requirements
     asize = round_up(size + dsize, dsize);
-
     // Search the free list for a fit
     block = find_fit(asize);
 
-    // If no fit is found, request more memory, and then and place the block
-    if (block == NULL) {
-        // Always request at least chunksize
-        extendsize = max(asize, chunksize);
-        block = extend_heap(extendsize);
-        // extend_heap returns an error
-        if (block == NULL) {
-            return bp;
-        }
+    // If a fit is found inside the free list
+    if (block != NULL) {
+        dbg_assert(!get_alloc(block));
+        size_t thisSize = get_size(block);
+        write_block(block, thisSize, true);
+        split(block, asize);
+        bp = header_to_payload(block);
+        dbg_ensures(mm_checkheap(__LINE__));
+        return bp;
     }
-
-    // The block should be marked as free
-    dbg_assert(!get_alloc(block));
-
-    // Mark block as allocated
-    size_t block_size = get_size(block);
-    write_block(block, block_size, true);
-
-    // Try to split the block if too large
-    split_block(block, asize);
-
+    // No fit is found inside the free list, request extra space
+    extendsize = max(asize, chunksize);
+    block = extend_heap(extendsize);
+    if (block == NULL) {
+        return bp;
+    }
+    size_t extraSize = get_size(block);
+    write_block(block, extraSize, true);
+    split(block, asize);
     bp = header_to_payload(block);
-
-    dbg_ensures(mm_checkheap(__LINE__));
     return bp;
 }
 
