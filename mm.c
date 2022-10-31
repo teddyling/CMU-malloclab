@@ -82,7 +82,7 @@
 #endif
 
 /* Basic constants */
-
+#define LISTSIZE 65
 typedef uint64_t word_t;
 
 /** @brief Word and header size (bytes) */
@@ -92,7 +92,7 @@ static const size_t wsize = sizeof(word_t);
 static const size_t dsize = 2 * wsize;
 
 /** @brief Minimum block size (bytes) */
-static const size_t min_block_size = 2 * dsize;
+static const size_t min_block_size = 4 * wsize;
 
 /**
  * TODO: explain what chunksize is
@@ -109,7 +109,7 @@ static const word_t alloc_mask = 0x1;
  * TODO: explain what size_mask is
  */
 static const word_t size_mask = ~(word_t)0xF;
-
+static const int minBlockShift = 4;
 
 /** @brief Represents the header and payload of one block in the heap */
 typedef struct block {
@@ -135,13 +135,12 @@ typedef struct block {
 
 /** @brief Pointer to first block in the heap */
 static block_t *heap_start = NULL;
-static block_t* freeListHead;
-static block_t* freeListTail;
+static block_t* list[LISTSIZE];
 
 void insertFirst(block_t* block);
 void delete(block_t* block);
-void splitBlock(block_t* block, block_t* nextBlock);
 void split(block_t* block, size_t asize);
+int findIndex(size_t asize);
 /*
  *****************************************************************************
  * The functions below are short wrapper functions to perform                *
@@ -421,14 +420,14 @@ static block_t *coalesce_block(block_t *block) {
         if (nextAlloc) {
             insertFirst(block);
             return block;
-        } else {
-            block_t* nextBlock = find_next(block);
-            size_t nextSize = get_size(nextBlock);
-            delete(nextBlock);
-            write_block(block, thisSize + nextSize, false);
-            insertFirst(block);
-            return block;
         }
+        block_t* nextBlock = find_next(block);
+        size_t nextSize = get_size(nextBlock);
+        delete(nextBlock);
+        write_block(block, thisSize + nextSize, false);
+        insertFirst(block);
+        return block;
+        
     }
     bool prevAlloc = get_alloc(find_prev(block));
     bool nextAlloc = get_alloc(find_next(block));
@@ -484,13 +483,6 @@ static block_t *extend_heap(size_t size) {
         return NULL;
     }
 
-    /*
-     * TODO: delete or replace this comment once you've thought about it.
-     * Think about what bp represents. Why do we write the new block
-     * starting one word BEFORE bp, but with the same size that we
-     * originally requested?
-     */
-
     // Initialize free block header/footer
     block_t *block = payload_to_header(bp);
     write_block(block, size, false);
@@ -505,35 +497,8 @@ static block_t *extend_heap(size_t size) {
     return block;
 }
 
-/**
- * @brief
- *
- * <What does this function do?>
- * <What are the function's arguments?>
- * <What is the function's return value?>
- * <Are there any preconditions or postconditions?>
- *
- * @param[in] block
- * @param[in] asize
- */
-/* 
-static void split_block(block_t *block, size_t asize) {
-    dbg_requires(get_alloc(block));
 
-    size_t block_size = get_size(block);
-
-    if ((block_size - asize) >= min_block_size) {
-        block_t *block_next;
-        write_block(block, asize, true);
-
-        block_next = find_next(block);
-        write_block(block_next, block_size - asize, false);
-    }
-
-    dbg_ensures(get_alloc(block));
-}
-
- */
+ 
 /**
  * @brief
  *
@@ -546,15 +511,84 @@ static void split_block(block_t *block, size_t asize) {
  * @return
  */
 static block_t *find_fit(size_t asize) {
-    block_t *block = freeListHead->payload.pointer.next;
-    while (block != freeListTail) {
-        if (get_size(block) >= asize) {
-            return block;
+    int index = findIndex(asize);
+    for (int i = index; i < LISTSIZE; i++) {
+        block_t* block = list[i];
+        while (block != NULL) {
+            size_t thisSize = get_size(block);
+            if (thisSize >= asize) {
+                return block;
+            }
+            block = block->payload.pointer.next;
         }
-        block = block->payload.pointer.next;
     }
     return NULL; // no fit found
 }
+
+int findIndex(size_t asize) {
+    if (asize == min_block_size) {
+        return 0;
+    
+    } 
+    int i = 1;
+    for (; i < LISTSIZE - 2; i++) {
+        size_t low = 1L << (minBlockShift + i);
+        size_t high = 1L << (minBlockShift + i + 1);
+        if (asize > low && asize <= high) {
+            return i;
+        }
+    }
+    i++;
+    return i;
+
+}
+
+void insertFirst(block_t* block) {
+    size_t blockSize = get_size(block);
+    int index = findIndex(blockSize);
+    if (list[index] == NULL) {
+        block->payload.pointer.next = NULL;
+        list[index] = block;
+        return;
+    } 
+    block_t* prevHead = list[index];
+    block->payload.pointer.next = prevHead;
+    prevHead->payload.pointer.prev = block;
+    list[index] = block;
+    
+}
+
+void delete(block_t* block) {
+    size_t blockSize = get_size(block);
+    int index = findIndex(blockSize);
+    if (list[index] == block) {
+        block_t* nextBlock = block->payload.pointer.next;
+        list[index] = nextBlock;
+        return;
+    }
+    block_t* prevBlock = block->payload.pointer.prev;
+    block_t* nextBlock = block->payload.pointer.next;
+    prevBlock->payload.pointer.next = nextBlock;
+    if (nextBlock != NULL) {
+         nextBlock->payload.pointer.prev = prevBlock;
+    }
+    
+}
+void split(block_t* block, size_t asize) {
+    dbg_requires(get_alloc(block));
+    delete(block);
+    size_t thisSize = get_size(block);
+    if (thisSize - asize >= min_block_size) {
+        block_t* nextBlock;
+        write_block(block, asize, true);
+        nextBlock = find_next(block);
+        write_block(nextBlock, thisSize - asize, false);
+        insertFirst(nextBlock);
+    } 
+     dbg_ensures(get_alloc(block));
+    
+}
+
 
 /**
  * @brief
@@ -589,17 +623,6 @@ bool mm_checkheap(int line) {
     return true;
 }
 
-void insertFirst(block_t* block) {
-    block->payload.pointer.prev = freeListHead;
-    block->payload.pointer.next = freeListHead->payload.pointer.next;
-    freeListHead->payload.pointer.next->payload.pointer.prev = block;
-    freeListHead->payload.pointer.next = block;
-}
-
-void delete(block_t* block) {
-    block->payload.pointer.prev->payload.pointer.next = block->payload.pointer.next;
-    block->payload.pointer.next->payload.pointer.prev = block->payload.pointer.prev;
-}
 //split the block and add the remaining block to the free list
 /* void splitBlock(block_t* block, size_t asize) {
     dbg_requires(get_alloc(block));
@@ -614,30 +637,7 @@ void delete(block_t* block) {
     dbg_ensures(get_alloc(block));
 } */
 
-void split(block_t* block, size_t asize) {
-    dbg_requires(get_alloc(block));
-    size_t thisSize = get_size(block);
-    if (thisSize - asize >= min_block_size) {
-        block_t* nextBlock;
-        write_block(block, asize, true);
-        nextBlock = find_next(block);
-        write_block(nextBlock, thisSize - asize, false);
-        splitBlock(block, nextBlock);
-    } else {
-        delete(block);
-    }
-}
 
-void splitBlock(block_t* block, block_t* nextBlock) {
-    block_t* prevBlock = block->payload.pointer.prev;
-    block_t* postBlock = block->payload.pointer.next;
-    prevBlock->payload.pointer.next = nextBlock;
-    nextBlock->payload.pointer.prev = prevBlock;
-    nextBlock->payload.pointer.next = postBlock;
-    postBlock->payload.pointer.prev = nextBlock;
-
-
-}
 /**
  * @brief
  *
@@ -650,31 +650,26 @@ void splitBlock(block_t* block, block_t* nextBlock) {
  */
 bool mm_init(void) {
     // Create the initial empty heap
-    word_t *start = (word_t *)(mem_sbrk(10 * wsize));
+    word_t *start = (word_t *)(mem_sbrk(2 * wsize));
 
     if (start == (void *)-1) {
         return false;
     }
-    // A placeholder block which represent the head of the doubly linked list
-    write_block((block_t*) &(start[0]), min_block_size, true);
-    freeListHead = (block_t*)start;
-    write_block((block_t*) &(start[4]), min_block_size, true);
-    freeListTail = (block_t*) &(start[4]);
-    
-    start[8] = pack(0, true); // Heap prologue (block footer)
-    start[9] = pack(0, true); // Heap epilogue (block header)
+    // A placeholder block which represent the head of the doubly linked list  
+    start[0] = pack(0, true); // Heap prologue (block footer)
+    start[1] = pack(0, true); // Heap epilogue (block header)
     //Let the head and tail be connected
-    freeListHead->payload.pointer.next = freeListTail;
-    freeListTail->payload.pointer.prev = freeListHead;
     // Heap start at the end of the tail, the epilogue for now
-    heap_start = (block_t*) &(start[9]);
+    heap_start = (block_t*) &(start[1]);
+    for (int i = 0; i < LISTSIZE; i++) {
+        list[i] = NULL;
+    }
 
     // Extend the empty heap with a free block of chunksize bytes
     block_t* extendFreeBlock = extend_heap(chunksize);
     if (extendFreeBlock == NULL) {
         return false;
     }
-    //insertFirst(extendFreeBlock);
 
     return true;
 }
@@ -869,3 +864,4 @@ void *calloc(size_t elements, size_t size) {
  *                                                                           *
  *****************************************************************************
  */
+
