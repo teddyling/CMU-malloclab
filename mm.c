@@ -4,8 +4,102 @@
  *
  * 15-213: Introduction to Computer Systems
  *
- * TODO: insert your documentation here. :)
+ * This file is a self-implemented malloc operation that was implemented using
+ *the segregated list method.
  *
+ * Each memory block consisted of three parts, the header, the footer, and the
+ *payload area. The header is an 8-byte integer that was used to store the
+ *property of its block. Because all the address was 16-bit aligned, the lower 4
+ *bits of a header will always be 0. As a result, the lowest bit was used to
+ *record the allocation status of its block. If the lowest bit is 1, it means
+ *the block is allocated; 0 means the block is not allocated and is currently
+ *free. The upper bits were used to record the size of the block, and it can be
+ *extracted by using bit operation and mask. The footer shares the same property
+ *as the header, and its purpose is to track the size and the allocation status
+ *of a previous block. The payload area has two usages. During allocation, the
+ *pointer of the payload area was returned to the malloc caller for them to
+ *store their data. During free, the payload area was overwritten by two block
+ *pointers for a segregated list. Details about the segregated list will be
+ *explained later. As a result, the payload area of the block was implemented by
+ *using a union. The address of the payload area can be used for storing both
+ *user's data and block pointers.
+ *
+ * An allocated block will look like this:
+ * -------------------------
+ * |         header        |
+ * |xxxxxxxxxxxxxxxxxxx0001|
+ * ||      size       |aloc|
+ * |-----------------------|
+ * |       payload area    |
+ * |                       |
+ * |                       |
+ * |                       |
+ * |                       |
+ * |                       |
+ * |                       |
+ * |-----------------------|
+ * |         footer        |
+ * |xxxxxxxxxxxxxxxxxxx0001|
+ * ||      size       |aloc|
+ * -------------------------
+ *
+ * A free block will look like this:
+ * -------------------------
+ * |         header        |
+ * |xxxxxxxxxxxxxxxxxxx0000|
+ * ||      size       |aloc|
+ * |-----------------------|
+ * |          prev         |
+ * |                       |
+ * |-----------------------|
+ * |          next         |
+ * |                       |
+ * |-----------------------|
+ * |                       |
+ * |-----------------------|
+ * |         footer        |
+ * |xxxxxxxxxxxxxxxxxxx0000|
+ * ||      size       |aloc|
+ * -------------------------
+ *
+ * The whole malloc and free operation were implemented based on the segregated
+ *list method. Each free list is a doubly linked free list. For each free block,
+ *its payload area was overwritten by two block pointers, called prev and next.
+ * According to its size, each free block will be placed inside its own free
+ *list, and all the free lists will be inside a block pointer array. For this
+ *implementation, there are a total of 16 free lists, where the first free lists
+ *will have the blocks of size of the minimum block size. The 2nd - 15th free
+ *lists will have a block size of [2^5 - 2^19], and the 16th free list will have
+ *a block size larger than 2^19. After the heap is initialized, all the indexes
+ *of the free list array will be set to NULL, indicating that all the free lists
+ *are empty. As blocks are allocated and freed, the freed block will first try
+ *to coalesce with its previous block and next block on the heap and finally put
+ *inside its corresponding free list according to its size. The insertion
+ *strategy is LIFO, where the newest free block is always inserted at the head
+ *of the free list.
+ *
+ * The following is a brief description of how malloc and free work are based on
+ *this implementation.
+ *
+ * When the user calls malloc(size), if the heap is not initialized,
+ * it will be initialized by writing a prologue footer and an epilogue header
+ *for address alignment purposes and then extending the heap by the size of
+ *chunksize (4096 bytes). Then the size will be adjusted for spaces for the
+ *header and footer and address alignment. According to this adjusted size, the
+ *corresponding free list will be located, and searching will be performed
+ *inside this free list to see if there is an available free block on the heap
+ *for allocation. If a block is found, this block will be attempted to split if
+ *it's too big for this allocation. Then this block(split or not) will be marked
+ *as allocated by overwriting its header and footer, and finally, its payload
+ *area pointer will be returned to the user. If there is no available free block
+ *of this size on the heap, the heap will be extended, and the above operation
+ *will be performed.
+ *
+ * When the user calls free(ptr), its corresponding block will be first located
+ *from this pointer. This block will be first marked as free and try to coalesce
+ *with its previous and next block on the heap. After possible coalescing, this
+ *block will be inserted at the head of its corresponding free list for the next
+ *possible allocation.
  *************************************************************************
  *
  * ADVICE FOR STUDENTS.
@@ -96,24 +190,25 @@ static const size_t dsize = 2 * wsize;
 static const size_t min_block_size = 4 * wsize;
 
 /**
- * @brief The minimum size that the heap extends when there is no proper free block left. 
- * (Must be divisible by dsize)
+ * @brief The minimum size that the heap extends when there is no proper free
+ * block left. (Must be divisible by dsize)
  */
 static const size_t chunksize = (1 << 12);
 
 /**
- * @brief Mask used to isolate the last bit of the header/footer to acquire block allocation status. 
+ * @brief Mask used to isolate the last bit of the header/footer to acquire
+ * block allocation status.
  */
 static const word_t alloc_mask = 0x1;
 
 /**
- * @brief Mask which the last four bits are 0 and the previous bits are 1 to isolate the size of a block represented by header/footer
+ * @brief Mask which the last four bits are 0 and the previous bits are 1 to
+ * isolate the size of a block represented by header/footer
  */
 static const word_t size_mask = ~(word_t)0xF;
 /**
  * @brief A constant used to determine the seg list index
-*/
-
+ */
 
 /** @brief Represents the header and payload of one block in the heap */
 typedef struct block {
@@ -121,8 +216,8 @@ typedef struct block {
     word_t header;
     union Payload {
         struct Pointer {
-            struct block* prev;
-            struct block* next;
+            struct block *prev;
+            struct block *next;
         } pointer;
         char p[0];
     } payload;
@@ -133,14 +228,15 @@ typedef struct block {
 /** @brief Pointer to first block in the heap */
 static block_t *heap_start = NULL;
 
-/** @brief Pointer to the seg list, which is represented by an array of block pointers. */
-static block_t* list[LISTSIZE];
+/** @brief Pointer to the seg list, which is represented by an array of block
+ * pointers. */
+static block_t *list[LISTSIZE];
 
-void insertFirst(block_t* block);
-void delete(block_t* block);
-void split(block_t* block, size_t asize);
-int findIndex(size_t asize);
-bool checkABlock(block_t* block);
+static void insertFirst(block_t *block);
+static void delete (block_t *block);
+static void split(block_t *block, size_t asize);
+static int findIndex(size_t asize);
+bool checkABlock(block_t *block);
 bool checkList(void);
 /*
  *****************************************************************************
@@ -256,7 +352,7 @@ static void *header_to_payload(block_t *block) {
 static word_t *header_to_footer(block_t *block) {
     dbg_requires(get_size(block) != 0 &&
                  "Called header_to_footer on the epilogue block");
-    return (word_t *)(((char*)&(block->payload)) + get_size(block) - dsize);
+    return (word_t *)(((char *)&(block->payload)) + get_size(block) - dsize);
 }
 
 /**
@@ -405,33 +501,36 @@ static block_t *find_prev(block_t *block) {
 /**
  * @brief
  *
- * This function takes a free block as an argument and checks its previous and next block's allocation status.
- * If its previous block and next block are not allocated, this function will add this block to the appropriate segregated list and return.
- * If either or both of the previous and next block is freed, 
- * this function will coalesce this block with the freed block(s) by writing headers and footers and adding this coalesced block to the appropriate segregated list.
- * This function will return a pointer to the final free block. 
- * If the input block is the first block on the heap, this function will not check its previous block because there is no block ahead. 
- * 
+ * This function takes a free block as an argument and checks its previous and
+ * next block's allocation status. If its previous block and next block are not
+ * allocated, this function will add this block to the appropriate segregated
+ * list and return. If either or both of the previous and next block is freed,
+ * this function will coalesce this block with the freed block(s) by writing
+ * headers and footers and adding this coalesced block to the appropriate
+ * segregated list. This function will return a pointer to the final free block.
+ * If the input block is the first block on the heap, this function will not
+ * check its previous block because there is no block ahead.
+ *
  * @param[in] block
  * @return the pointer to the possibly coalesced free block
  */
 static block_t *coalesce_block(block_t *block) {
-    dbg_assert(!get_alloc(block)); 
+    dbg_assert(!get_alloc(block));
     size_t thisSize = get_size(block);
-    // Case 1: The block is the first block on the heap, can't check previous block or seg fault.
+    // Case 1: The block is the first block on the heap, can't check previous
+    // block or seg fault.
     if (block == heap_start) {
         bool nextAlloc = get_alloc(find_next(block));
         if (nextAlloc) {
             insertFirst(block);
             return block;
         }
-        block_t* nextBlock = find_next(block);
+        block_t *nextBlock = find_next(block);
         size_t nextSize = get_size(nextBlock);
-        delete(nextBlock);
+        delete (nextBlock);
         write_block(block, thisSize + nextSize, false);
         insertFirst(block);
         return block;
-        
     }
     // Case 2: This block is not the first block on the heap
     bool prevAlloc = get_alloc(find_prev(block));
@@ -441,30 +540,30 @@ static block_t *coalesce_block(block_t *block) {
     if (prevAlloc && nextAlloc) {
         insertFirst(block);
         return block;
-    // Case 2.2: Next block is free, coalesce them.
+        // Case 2.2: Next block is free, coalesce them.
     } else if (prevAlloc && !nextAlloc) {
-        block_t* nextBlock = find_next(block);
+        block_t *nextBlock = find_next(block);
         size_t nextSize = get_size(nextBlock);
-        delete(nextBlock);
+        delete (nextBlock);
         write_block(block, thisSize + nextSize, false);
         insertFirst(block);
         return block;
-    // Case 2.3: Previous block is free, coalesce them.
+        // Case 2.3: Previous block is free, coalesce them.
     } else if (!prevAlloc && nextAlloc) {
-        block_t* prevBlock = find_prev(block);
+        block_t *prevBlock = find_prev(block);
         size_t prevSize = get_size(prevBlock);
-        delete(prevBlock);
+        delete (prevBlock);
         write_block(prevBlock, thisSize + prevSize, false);
         insertFirst(prevBlock);
         return prevBlock;
-    // Case 2.4: Previous and next block are free, coalesce all of them.
-    } else if (!prevAlloc && !nextAlloc){
-        block_t* prevBlock = find_prev(block);
-        block_t* nextBlock = find_next(block);
+        // Case 2.4: Previous and next block are free, coalesce all of them.
+    } else if (!prevAlloc && !nextAlloc) {
+        block_t *prevBlock = find_prev(block);
+        block_t *nextBlock = find_next(block);
         size_t prevSize = get_size(prevBlock);
         size_t nextSize = get_size(nextBlock);
-        delete(prevBlock);
-        delete(nextBlock);
+        delete (prevBlock);
+        delete (nextBlock);
         write_block(prevBlock, thisSize + prevSize + nextSize, false);
         insertFirst(prevBlock);
         return prevBlock;
@@ -475,11 +574,13 @@ static block_t *coalesce_block(block_t *block) {
 /**
  * @brief
  *
- * This function takes an unsigned block size as an argument and tries to extend the heap size by calling "mem_sbrk. "
- * This function will return a pointer to the extended block if successful or return NULL if it fails to extend the heap. 
- * 
+ * This function takes an unsigned block size as an argument and tries to extend
+ * the heap size by calling "mem_sbrk. " This function will return a pointer to
+ * the extended block if successful or return NULL if it fails to extend the
+ * heap.
+ *
  * @param[in] size
- * @return pointer to the extended block if succeed, NULL if failed. 
+ * @return pointer to the extended block if succeed, NULL if failed.
  */
 static block_t *extend_heap(size_t size) {
     void *bp;
@@ -504,22 +605,23 @@ static block_t *extend_heap(size_t size) {
     return block;
 }
 
-
- 
 /**
  * @brief
  *
- * This function takes an unsigned block size as an argument and tries to find the appropriate free block with a size larger than the required size from the seg list. 
- * This function will first compute the index of the seg list where the search should start and search the remaining seg list for an appropriate block. 
- * If a block is found, the pointer to this block will be returned. If there is no block found, NULL will be returned. 
- * 
+ * This function takes an unsigned block size as an argument and tries to find
+ * the appropriate free block with a size larger than the required size from the
+ * seg list. This function will first compute the index of the seg list where
+ * the search should start and search the remaining seg list for an appropriate
+ * block. If a block is found, the pointer to this block will be returned. If
+ * there is no block found, NULL will be returned.
+ *
  * @param[in] asize
- * @return A pointer to the free block if found, NULL if not found. 
+ * @return A pointer to the free block if found, NULL if not found.
  */
 static block_t *find_fit(size_t asize) {
     int index = findIndex(asize);
     for (int i = index; i < LISTSIZE; i++) {
-        block_t* block = list[i];
+        block_t *block = list[i];
         while (block != NULL) {
             size_t thisSize = get_size(block);
             // Found fit
@@ -530,16 +632,17 @@ static block_t *find_fit(size_t asize) {
         }
     }
     // No fit found
-    return NULL; 
+    return NULL;
 }
 /**
  * @brief
- * This function takes an unsigned block size as an argument and returns the index of the seg list to which a block of this size should belong. 
- * 
+ * This function takes an unsigned block size as an argument and returns the
+ * index of the seg list to which a block of this size should belong.
+ *
  * @param[in] asize
  * @return correct seg list index
-*/
-int findIndex(size_t asize) {
+ */
+static int findIndex(size_t asize) {
     if (asize == min_block_size) {
         return 0;
     }
@@ -554,135 +657,151 @@ int findIndex(size_t asize) {
 }
 /**
  * @brief
- * 
- * This function takes a block pointer as an argument and adds this block pointer to the head of the correct seg list. 
- * 
+ *
+ * This function takes a block pointer as an argument and adds this block
+ * pointer to the head of the correct seg list.
+ *
  * @param[in] block
  * @return
-*/
+ */
 
-void insertFirst(block_t* block) {
+static void insertFirst(block_t *block) {
     size_t blockSize = get_size(block);
     int index = findIndex(blockSize);
-    // If the seg list this block should belong to is empty, this block will be assigned as the head
+    // If the seg list this block should belong to is empty, this block will be
+    // assigned as the head
     if (list[index] == NULL) {
         block->payload.pointer.next = NULL;
         list[index] = block;
         return;
-    } 
-    // If the seg list is not empty, set this block as the new head, and the old head as the next. 
-    block_t* prevHead = list[index];
+    }
+    // If the seg list is not empty, set this block as the new head, and the old
+    // head as the next.
+    block_t *prevHead = list[index];
     block->payload.pointer.next = prevHead;
     prevHead->payload.pointer.prev = block;
     list[index] = block;
-    
 }
 /**
  * @brief
- * 
- * This function takes a block pointer as an argument and delete this block pointer from the corresponding seg list. 
- * 
+ *
+ * This function takes a block pointer as an argument and delete this block
+ * pointer from the corresponding seg list.
+ *
  * @param[in] block
-*/
-void delete(block_t* block) {
+ */
+static void delete (block_t *block) {
     size_t blockSize = get_size(block);
     int index = findIndex(blockSize);
     // If this block is the head of the seg list
     if (list[index] == block) {
-        block_t* nextBlock = block->payload.pointer.next;
+        block_t *nextBlock = block->payload.pointer.next;
         list[index] = nextBlock;
         return;
     }
     // If this block is not the head of the seg list
-    block_t* prevBlock = block->payload.pointer.prev;
-    block_t* nextBlock = block->payload.pointer.next;
+    block_t *prevBlock = block->payload.pointer.prev;
+    block_t *nextBlock = block->payload.pointer.next;
     prevBlock->payload.pointer.next = nextBlock;
     if (nextBlock != NULL) {
-         nextBlock->payload.pointer.prev = prevBlock;
+        nextBlock->payload.pointer.prev = prevBlock;
     }
-    
 }
 /**
  * @brief
- * 
- * This function takes an allocated block pointer and an unsigned block size as arguments and tries to split the allocated block into two blocks.
- * If the block size is large enough, the input block will be split, and the extra part will be freed and inserted into its corresponding seg list.
- * The precondition and postcondition are that the pointer to the block has to be allocated all the time. 
- * 
+ *
+ * This function takes an allocated block pointer and an unsigned block size as
+ * arguments and tries to split the allocated block into two blocks. If the
+ * block size is large enough, the input block will be split, and the extra part
+ * will be freed and inserted into its corresponding seg list. The precondition
+ * and postcondition are that the pointer to the block has to be allocated all
+ * the time.
+ *
  * @param[in] block
-*/
-void split(block_t* block, size_t asize) {
+ */
+static void split(block_t *block, size_t asize) {
     dbg_requires(get_alloc(block));
-    delete(block);
+    delete (block);
     size_t thisSize = get_size(block);
     if (thisSize - asize >= min_block_size) {
-        block_t* nextBlock;
+        block_t *nextBlock;
         write_block(block, asize, true);
         nextBlock = find_next(block);
         write_block(nextBlock, thisSize - asize, false);
         insertFirst(nextBlock);
-    } 
-     dbg_ensures(get_alloc(block));
+    }
+    dbg_ensures(get_alloc(block));
 }
-
 
 /**
  * @brief
  *
- * This function will check the blocks on the heap and the blocks inside the seg list. 
- * For the heap, the block address alignment, block address inside the boundary,
- * block size, block header-footer consistency, and consecutive free blocks will be checked. 
- * For the seg list, the pointer consistency, block address inside the boundary,
- * block number from the heap and the list, and the free block index will be checked.
- *  
+ * This function will check the blocks on the heap and the blocks inside the seg
+ * list. For the heap, the block address alignment, block address inside the
+ * boundary, block size, block header-footer consistency, and consecutive free
+ * blocks will be checked. For the seg list, the pointer consistency, block
+ * address inside the boundary, block number from the heap and the list, and the
+ * free block index will be checked.
+ *
  * @param[in] line
- * @return true if no errors found, false if any error found. 
+ * @return true if no errors found, false if any error found.
  */
 
 bool mm_checkheap(int line) {
-    block_t* block = heap_start;
-    if ((void*)find_prev_footer(block) < mem_heap_lo()) {
+    block_t *block = heap_start;
+    // check prologue
+    if ((void *)find_prev_footer(block) < mem_heap_lo()) {
         dbg_printf("No prologue footer!\n");
         return false;
     }
+    // check all the blocks
     for (; get_size(block) != 0; block = find_next(block)) {
         if (!checkABlock(block)) {
             dbg_printf("Called Line: %d\n", line);
             return false;
-        } 
+        }
     }
-    if ((void*) block > mem_heap_hi()) {
+    // check epilogue
+    if ((void *)block > mem_heap_hi()) {
         dbg_printf("No Epilogue Header!\n");
         return false;
     }
+    // check seg list
     return checkList();
 }
-bool checkABlock(block_t* block) {
+bool checkABlock(block_t *block) {
     // Check for address alignment
-    if (((size_t)&(block->payload)) % 16 != 0) {
-        dbg_printf("payload address %p is not aligned!\n",(void*) &(block->payload));
+    if (((size_t) & (block->payload)) % 16 != 0) {
+        dbg_printf("payload address %p is not aligned!\n",
+                   (void *)&(block->payload));
     }
     // Check block lie within heap boundaries
-    if ((void*) block > mem_heap_hi() || (void*) block < mem_heap_lo()) {
+    if ((void *)block > mem_heap_hi() || (void *)block < mem_heap_lo()) {
         dbg_printf("A block is not lie within heap boundaries\n");
-        dbg_printf("This block address is %p\n", (void*) block);
+        dbg_printf("This block address is %p\n", (void *)block);
         return false;
     }
     // Check block header and footer
     if (block->header != *(header_to_footer(block))) {
         dbg_printf("A block's header and footer do not match\n");
-        dbg_printf("This block address is %p, block header is %ld, block footer is %ld\n", (void*)block, block->header, *header_to_footer(block));
+        dbg_printf("This block address is %p, block header is %ld, block "
+                   "footer is %ld\n",
+                   (void *)block, block->header, *header_to_footer(block));
         return false;
     }
     if (get_size(block) < min_block_size) {
         dbg_printf("A block's size is less than the min block size\n");
-        dbg_printf("This block address is %p, block header is %ld, block footer is %ld\n", (void*)block, block->header, *header_to_footer(block));
+        dbg_printf("This block address is %p, block header is %ld, block "
+                   "footer is %ld\n",
+                   (void *)block, block->header, *header_to_footer(block));
         return false;
     }
     // Check consecutive free block
-    if (block != heap_start && !get_alloc(block) && !get_alloc(find_prev(block))) {
+    if (block != heap_start && !get_alloc(block) &&
+        !get_alloc(find_prev(block))) {
         dbg_printf("Consecutive free blocks in the heap!\n");
-        dbg_printf("The two blocks' addresses are %p, %p\n", (void*) (find_prev(block)), (void*)block);
+        dbg_printf("The two blocks' addresses are %p, %p\n",
+                   (void *)(find_prev(block)), (void *)block);
         return false;
     }
     return true;
@@ -697,17 +816,21 @@ bool checkList(void) {
         if (list[i]->payload.pointer.next == NULL) {
             continue;
         }
-        block_t* block = list[i];
-        block_t* nextBlock = block->payload.pointer.next;
+        block_t *block = list[i];
+        block_t *nextBlock = block->payload.pointer.next;
         while (nextBlock != NULL) {
             if (block->payload.pointer.next != nextBlock) {
-                dbg_printf("Two consecutive free blocks inside the list do not match!\n");
-                dbg_printf("Their addresses are %p, %p\n", (void*)block, (void*)nextBlock);
+                dbg_printf("Two consecutive free blocks inside the list do not "
+                           "match!\n");
+                dbg_printf("Their addresses are %p, %p\n", (void *)block,
+                           (void *)nextBlock);
                 return false;
             }
             if (block != nextBlock->payload.pointer.prev) {
-                dbg_printf("Two consecutive free blocks inside the list do not match!\n");
-                dbg_printf("Their addresses are %p, %p\n", (void*)block, (void*)nextBlock);
+                dbg_printf("Two consecutive free blocks inside the list do not "
+                           "match!\n");
+                dbg_printf("Their addresses are %p, %p\n", (void *)block,
+                           (void *)nextBlock);
                 return false;
             }
             block = block->payload.pointer.next;
@@ -719,11 +842,12 @@ bool checkList(void) {
         if (list[i] == NULL) {
             continue;
         }
-        block_t* block = list[i];
+        block_t *block = list[i];
         while (block != NULL) {
-            if ((void*)block > mem_heap_hi() || (void*)block < mem_heap_lo()) {
+            if ((void *)block > mem_heap_hi() ||
+                (void *)block < mem_heap_lo()) {
                 dbg_printf("A free list is out of bound\n");
-                dbg_printf("The address is %p\n", (void*) block);
+                dbg_printf("The address is %p\n", (void *)block);
                 return false;
             }
             block = block->payload.pointer.next;
@@ -732,7 +856,8 @@ bool checkList(void) {
     // Check if the number of free block matches.
     int freeFromHeap = 0;
     int freeFromList = 0;
-    for (block_t* block = heap_start; get_size(block) != 0; block = find_next(block)) {
+    for (block_t *block = heap_start; get_size(block) != 0;
+         block = find_next(block)) {
         if (!get_alloc(block)) {
             freeFromHeap++;
         }
@@ -741,14 +866,15 @@ bool checkList(void) {
         if (list[i] == NULL) {
             continue;
         }
-        block_t* block = list[i];
+        block_t *block = list[i];
         while (block != NULL) {
             freeFromList++;
             block = block->payload.pointer.next;
         }
     }
     if (freeFromHeap != freeFromList) {
-        dbg_printf("Free block number in the heap and in the list are not consistent\n");
+        dbg_printf("Free block number in the heap and in the list are not "
+                   "consistent\n");
         return false;
     }
     // Check if free blocks are in the right list
@@ -756,12 +882,12 @@ bool checkList(void) {
         if (list[i] == NULL) {
             continue;
         }
-        block_t* block = list[i];
+        block_t *block = list[i];
         while (block != NULL) {
             size_t thisSize = get_size(block);
             if (i != findIndex(thisSize)) {
                 dbg_printf("A free block is in the wrong seg list\n");
-                dbg_printf("This block address is %p \n", (void*) block);
+                dbg_printf("This block address is %p \n", (void *)block);
                 return false;
             }
             block = block->payload.pointer.next;
@@ -773,12 +899,14 @@ bool checkList(void) {
 /**
  * @brief
  *
- * This function takes no arguments and initializes the heap by first writing a prologue footer and an epilogue header on the heap.
- * It then extends the heap by chunksize by calling the "extend_heap" function.
- * This function also initializes the seg list array by setting all the list heads point to NULL. 
- * If the heap is initialized successfully, this function will return true. Otherwise, return false. 
+ * This function takes no arguments and initializes the heap by first writing a
+ * prologue footer and an epilogue header on the heap. It then extends the heap
+ * by chunksize by calling the "extend_heap" function. This function also
+ * initializes the seg list array by setting all the list heads point to NULL.
+ * If the heap is initialized successfully, this function will return true.
+ * Otherwise, return false.
  *
- * @return True if initialization is successful, false if not. 
+ * @return True if initialization is successful, false if not.
  */
 bool mm_init(void) {
     // Create the initial empty heap
@@ -790,13 +918,13 @@ bool mm_init(void) {
     start[0] = pack(0, true); // Heap prologue (block footer)
     start[1] = pack(0, true); // Heap epilogue (block header)
     // Heap start at the end of the tail, the epilogue for now
-    heap_start = (block_t*) &(start[1]);
+    heap_start = (block_t *)&(start[1]);
     // Initialize the seg list array
     for (int i = 0; i < LISTSIZE; i++) {
         list[i] = NULL;
     }
     // Extend the empty heap with a free block of chunksize bytes
-    block_t* extendFreeBlock = extend_heap(chunksize);
+    block_t *extendFreeBlock = extend_heap(chunksize);
     if (extendFreeBlock == NULL) {
         return false;
     }
@@ -806,14 +934,19 @@ bool mm_init(void) {
 /**
  * @brief
  *
- * This function will take a payload size as an argument and tries to allocate proper space on the heap for this payload. 
- * If the allocation process fails, this function will return NULL. 
- * If there is a free block on the heap that has the proper size for allocation, this function will mark this block as allocated and return a pointer to its payload area.
- * If there is no such a block, this function will extend the heap and tries to split the extended block. 
- * It will return a pointer to the extended block's payload area if successful and NULL if the heap extension fails. 
+ * This function will take a payload size as an argument and tries to allocate
+ proper space on the heap for this payload.
+ * If the allocation process fails, this function will return NULL.
+ * If there is a free block on the heap that has the proper size for allocation,
+ this function will mark this block as allocated and return a pointer to its
+ payload area.
+ * If there is no such a block, this function will extend the heap and tries to
+ split the extended block.
+ * It will return a pointer to the extended block's payload area if successful
+ and NULL if the heap extension fails.
 
  * @param[in] size
- * @return pointer to block's payload area if successful, NULL if failed. 
+ * @return pointer to block's payload area if successful, NULL if failed.
  */
 void *malloc(size_t size) {
     dbg_requires(mm_checkheap(__LINE__));
@@ -865,11 +998,12 @@ void *malloc(size_t size) {
 /**
  * @brief
  *
- * This function takes an allocated block's payload area pointer and frees its corresponding block. 
- * This function will first find the pointer to the block from the pointer to the payload area,
- * and tries to coalesce this freed block with its previous and next block. 
- * Finally, insert the block to the proper seg list according to its size. 
- * To use this function, the payload pointer passed has to be allocated. 
+ * This function takes an allocated block's payload area pointer and frees its
+ * corresponding block. This function will first find the pointer to the block
+ * from the pointer to the payload area, and tries to coalesce this freed block
+ * with its previous and next block. Finally, insert the block to the proper seg
+ * list according to its size. To use this function, the payload pointer passed
+ * has to be allocated.
  *
  * @param[in] bp
  */
@@ -898,15 +1032,20 @@ void free(void *bp) {
 /**
  * @brief
  *
- * This function takes an allocated payload area pointer and an unsigned payload size as arguments and tries to resize this payload area. 
- * If the input new size is 0 or realloc fails, this function will return NULL. 
- * If the input payload pointer is NULL, this function will just allocate an area according to the input size. 
- * Otherwise, this function will allocate a new block according to the input size, copy all the memory to the new block, and free the old block.
- * A pointer to the payload area of the new block will be returned if the process is successful.
+ * This function takes an allocated payload area pointer and an unsigned payload
+ size as arguments and tries to resize this payload area.
+ * If the input new size is 0 or realloc fails, this function will return NULL.
+ * If the input payload pointer is NULL, this function will just allocate an
+ area according to the input size.
+ * Otherwise, this function will allocate a new block according to the input
+ size, copy all the memory to the new block, and free the old block.
+ * A pointer to the payload area of the new block will be returned if the
+ process is successful.
 
  * @param[in] ptr
  * @param[in] size
- * @return A pointer pointing to the payload area of the new block if successful, NULL if failed. 
+ * @return A pointer pointing to the payload area of the new block if
+ successful, NULL if failed.
  */
 void *realloc(void *ptr, size_t size) {
     block_t *block = payload_to_header(ptr);
@@ -948,13 +1087,15 @@ void *realloc(void *ptr, size_t size) {
 /**
  * @brief
  *
- * This function takes the number of elements and element size as arguments and tries to allocate a block for the total space needed. 
- * This function also sets the allocated memory to zero. 
- * This function will return a pointer to the allocated block's payload area if successful and return NULL if failed. 
+ * This function takes the number of elements and element size as arguments and
+ * tries to allocate a block for the total space needed. This function also sets
+ * the allocated memory to zero. This function will return a pointer to the
+ * allocated block's payload area if successful and return NULL if failed.
  *
  * @param[in] elements
  * @param[in] size
- * @return pointer to allocated block's payload area if successful, NULL if failed. 
+ * @return pointer to allocated block's payload area if successful, NULL if
+ * failed.
  */
 void *calloc(size_t elements, size_t size) {
     void *bp;
